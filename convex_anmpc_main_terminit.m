@@ -21,16 +21,15 @@ end
 
 %% Simulation parameters
 p = param_init();                  % Initialise problem parameters 
-T_sim = 100;                         % Number of time steps simulated
-Tmax = 50;                         % Number of time steps in MPC horizon
+T_sim = 50;                         % Number of time steps simulated
+Tmax = 60;                         % Number of time steps in MPC horizon
 p.delta = 1;                       % discrete time sampling interval
 maxiter = 10;                       % Max number of iterations
 maxiterLS = 50;                    % Max number of line search iterations
-alphaLS = 0.1;                      % Line search scaling factor
-Q = [0 0;0 1]; R = 0.1;            % Cost matrices
+betaLS = 0.1;                      % Line search scaling factor
+Q = [0 0;0 1]; R = 0.2;            % Cost matrices
 sqrtQ = [0 1]; sqrtR = R^0.5; 
 dtheta = 1; p.dtheta = dtheta;
-theta_mu = 0; %1e-5;               % Parameter update gain: theta_mu = 0 => no parameter adaptation
 
 %% Initialise problem
 x_sim = zeros(p.nx, T_sim+1);        % closed loop state sequence
@@ -81,11 +80,6 @@ MAE = test_fit(@dynamics, dim_N_test, f_RBF_, g_RBF, h_RBF, p_test_fit, plt);
 p.w_max = MAE;
 % *** change p.w_max to introduce artificial disturbance ***
 
-% theta_g = theta_g_old;
-% theta_h = theta_h_old;
-theta = [theta_g{1}; theta_g{2}; theta_h{1}; theta_h{2}];
-theta_store = repmat(theta,1,T_sim+1);
-
 %% Terminal set
 % Linearise g at reference
 [A1_term, B1_term] = linearise(p.h_r, p.u_r, theta_g, c_g, rho_g, p);
@@ -98,17 +92,15 @@ A_d_term = eye(p.nx) + p.delta*(A1_term - A2_term);
 B_d_term = p.delta*(B1_term - B2_term);
 
 % Set optimisation
-[K,P,V,gam,beta_cost] = term_comp(A_d_term, B_d_term,Q,R,p);
+[K,P,V,gam,beta] = term_comp(A_d_term, B_d_term,Q,R,p);
 sqrtP = sqrtm(P); sqrtV = sqrtm(V); 
-p.w_max = MAE;
-
-% p.A1 = p.A1*0.8; % reduce flow between tanks by 20%
+p.w_max = MAE/3;
 
 %% Feasible inital trajectory
 x_0(:,1) = p.x_init; % initial state
 % Q_init = Q; R_init = 0.2;
 % [K_init,P_init] = dlqr(A_d_term,B_d_term,Q_init,R_init); K_init = -K_init;
-K_init = K; Q_dp = diag([1e3,1]); R_dp = 1e-3;
+K_init = K; Q_dp = eye(p.nx); R_dp = 1e-3;
 K_dp_tol = 1e-3;
 iterflag = 1; iter = 0; dp_itermax = 5;
 while iterflag
@@ -125,9 +117,8 @@ while iterflag
     Jsq_init = 0;
     for i = 1:Tmax
         % Control input (dummy controller)
-        u_0(:,i) = max(min(K_dp(:,:,i)*(x_0(:,i)-x_r(:,i)) + u_r(:,i), p.u_max), p.u_min);
-    
-        % Generate feasible trajectory
+        u_0(:,i) = max(min(K_dp(:,:,i)*(x_0(:,i)-x_r(:,i)) + u_r(:,i), p.u_max-2), p.u_min+2);
+        % Nominal trajectory
         % [~, x_0(:,i+1)] = dynamics(x_0(:,i), u_0(:,i), p);
         x_0(:,i+1) = x_0(:,i) + p.delta*(f_RBF(x_0(:,i), u_0(:,i), theta_g, c_g, rho_g) ...
                        - f_RBF(x_0(:,i), u_0(:,i), theta_h, c_h, rho_h));
@@ -140,7 +131,7 @@ while iterflag
     else
         plot_init(x_0,u_0,x_r,V,p);
         if iter >  1
-            fprintf("iter: %d/%d J_init = %.3e norm(K_dp - K_dp_old)/norm(K_dp_old) = %.3e\n", iter, dp_itermax, sqrt(Jsq_init), norm(K_dp(:,:,1) - K_dp_old)/norm(K_dp_old));
+            fprintf("iter: %d/%d J_init %.3e norm(K_dp - K_dp_old)/norm(K_dp_old) %.3e\n", iter, dp_itermax, sqrt(Jsq_init), norm(K_dp(:,:,1) - K_dp_old)/norm(K_dp_old));
         end
         u_00 = u_0;
     end
@@ -154,19 +145,45 @@ c_00 = c_0;
 K_dp_00 = K_dp;
 plot_init(x_0,u_0,x_r,V,p);
 
-[c, x_lb, x_ub, Termconstr, cvx_status] = cvx_terminal_optimisation(x_0, u_0, c_0, x_r(:,1:Tmax+1), A1, A2, B1, B2, K_dp, sqrtV, p, theta_g, c_g, rho_g, theta_h, c_h, rho_h);
-if Termconstr > 1
-    figure(1); 
-    plot(x_lb(1,:),x_lb(2,:),'m+');
-    plot(x_ub(1,:),x_ub(2,:),'c+');
-    error("Failed to find feasible solution: minimum terminal constraint x_term'*V*x_term = %.3e", Termconstr); % give up
+
+iterflag = 1; iter = 0; init_itermax = 5;
+while iterflag
+    Jsq_init = 0;
+    for i = 1:Tmax
+        u_0(:,i) = K_dp(:,:,i)*x_0(:,i) + c_0(:,i);
+        x_0(:,i+1) = x_0(:,i) + p.delta*(f_RBF(x_0(:,i), u_0(:,i), theta_g, c_g, rho_g) ...
+            - f_RBF(x_0(:,i), u_0(:,i), theta_h, c_h, rho_h));
+        % [~, x_0(:,i+1)] = dynamics(x_0(:,i), u_0(:,i), p);
+        Jsq_init = Jsq_init + (norm(sqrtQ*(x_0(:,i)-x_r(:,i)),2))^2 + (norm(sqrtQ*(u_0(:,i)-u_r(:,i)),2))^2;
+    end
+    Jsq_init = Jsq_init + (norm(sqrtP*(x_0(:,i)-x_r(:,i)),2))^2;
+
+    % Linearise system (CT)
+    [A1, B1] = linearise(x_0, u_0, theta_g, c_g, rho_g, p); % linearise g
+    [A2, B2] = linearise(x_0, u_0, theta_h, c_h, rho_h, p); % linearise h
+    A_d = repmat(eye(p.nx),1,1,Tmax) + p.delta*(A1 - A2);
+    B_d = p.delta*(B1 - B2);
+    K_dp = dp_seq(A_d,B_d,Q_dp,R_dp,P);
+
+    [c, x_lb, x_ub, Termset, cvx_status] = cvx_terminal_optimisation(x_0, u_0, c_0, x_r(:,1:Tmax+1), A1, A2, B1, B2, K_dp, sqrtV, p, theta_g, c_g, rho_g, theta_h, c_h, rho_h);
+    iter = iter+1;
+
+    c_0 = c_0 + c;
+    delta_c = norm(c)/norm(c_0);
+    fprintf("iter: %d/%d Termset %.3e J_init %.3e delta_c %.3e\n", iter, dp_itermax, Termset, sqrt(Jsq_init), delta_c);
+    plot_init(x_0,u_0,x_r,V,p);
+    if iter > init_itermax || Termset < 1
+        iterflag = 0;
+    end
+    plot_init(x_0,u_0,x_r,V,p);
 end
+
 
 %% MPC loop
 ctol = 1e-2;
 Jtol = 1e-2;
 Jold = sqrt(Jsq_init);
-t = 0; 
+t = 0;
 x_sim(:,1) = p.x_init; % initial state
 while t < T_sim
     fprintf("************** Solving problem at time %d/%d ******************\n", t, T_sim)
@@ -183,9 +200,8 @@ while t < T_sim
             K_dp(:,:,1:end-1) = K_dp(:,:,2:end);
             K_dp(:,:,end) = K;
             x_0(:,1) = x_sim(:,t+1);
-            Jold = sqrt(Jold^2 - (norm([sqrtQ*(x_sim(:,t)-x_r(:,t));sqrtR*(u_sim(:,t)-u_r(:,t))]))^2 + beta_cost);
+            Jold = sqrt(Jold^2 - (norm([sqrtQ*(x_sim(:,t)-x_r(:,t));sqrtR*(u_sim(:,t)-u_r(:,t))]))^2);
         end
-
         for i = 1:Tmax
             u_0(:,i) = K_dp(:,:,i)*x_0(:,i) + c_0(:,i);
             x_0(:,i+1) = x_0(:,i) + p.delta*(f_RBF(x_0(:,i), u_0(:,i), theta_g, c_g, rho_g) ...
@@ -226,13 +242,13 @@ while t < T_sim
         %     theta_g, c_g, rho_g, theta_h, c_h, rho_h);
 
         t_elapsed = toc;
-        fprintf("cputime %.3e %s ", t_elapsed, cvx_status);
+        fprintf("cputime %.3e status %s ", t_elapsed, cvx_status);
         t_avg = t_avg + t_elapsed;
         iter_count = iter_count+1;
 
         % Update input perturbation
         if ~strcmp(cvx_status, 'Solved') && ~strcmp(cvx_status, 'Inaccurate/Solved')
-            c_0 = c_00 + alphaLS*(c_0 - c_00)/norm(c_00);
+            c_0 = c_00 + betaLS*(c_0 - c_00)/norm(c_00);
             K_dp = K_dp_00;
             fprintf("| iterLS %d/%d ", iterLS, maxiterLS);
             iterLS = iterLS + 1;
@@ -241,6 +257,8 @@ while t < T_sim
                 error("Failed to find feasible solution"); % give up
             end
             delta_c = norm(c_0 - c_00)/norm(c_00);
+        elseif J < 0
+            error("cvx reports negative optimal cost")
         else
             deltaJ = abs(J - Jold)/Jold;
             Jold = J;
@@ -263,37 +281,10 @@ while t < T_sim
     % Update control input and system state
     u_sim(t+1) = K_dp(:,:,1)*x_sim(:,t+1) + c_0(1); % Control input
     % x_next = x_sim(:,t+1) + p.delta*(f_RBF(x_sim(:,t+1), u_sim(:,t+1), theta_g, c_g, rho_g) ...
-    %               - f_RBF(x_sim(:,t+1), u_sim(:,t+1), theta_h, c_h, rho_h));
+    %               - f_RBF(x_sim(:,t+1), u_sim(:,t+1), theta_h, c_h, rho_h));    
     [~, x_next] = dynamics(x_sim(:,t+1), u_sim(t+1), p); % State
-    x_sim(:,t+2) = x_next + (p.w_max).*randn(p.nx,1);
-
-    % parameter update using Least Mean Square (LMS) filter
-    if theta_mu > 0
-        [g_, D_g_] = f_RBF(x_sim(:,t+1), u_sim(:,t+1), theta_g, c_g, rho_g);
-        [h_, D_h_] = f_RBF(x_sim(:,t+1), u_sim(:,t+1), theta_h, c_h, rho_h);
-        D_pred = p.delta*[D_g_, -D_h_];
-        theta = [theta_g{1}; theta_g{2}; theta_h{1}; theta_h{2}];
-        x_next_pred = x_sim(:,t+1) + D_pred*theta; %= x_sim(:,t+1) + p.delta*(g_ - h_);
-        normsq_D = norm(D_pred,2)^2;
-        while theta_mu > 0.1/normsq_D
-            theta_mu = 0.1*theta_mu;    % reduce parameter update gain
-        end
-        delta_theta = theta_mu*D_pred'*(x_sim(:,t+2) - x_next_pred); % LMS parameter update
-        theta = max(theta + delta_theta,0);
-        ntheta = 0;
-        theta_g{1} = theta(ntheta+(1:length(theta_g{1})));
-        ntheta = ntheta + length(theta_g{1});
-        theta_g{2} = theta(ntheta+(1:length(theta_g{2})));
-        ntheta = ntheta + length(theta_g{2});
-        theta_h{1} = theta(ntheta+(1:length(theta_h{1})));
-        ntheta = ntheta + length(theta_h{1});
-        theta_h{2} = theta(ntheta+(1:length(theta_h{2})));
-        theta_store(:,t+2) = theta;
-        fprintf(1,"delta_theta %.3e 1/norm(D)^2 %.3e theta_mu %.3e\n", norm(delta_theta)/norm(theta), 1/normsq_D, theta_mu);
-    end
-
+    x_sim(:,t+2) = x_next;
     t = t+1;
-    fprintf(1,"\n");
     % *** 
     % to include an extra disturbance change this to (e.g.)     
     % w_true = 2*(rand(2,1)-0.5).*p.w_max;
@@ -305,35 +296,33 @@ while t < T_sim
 
 end
 
-J_run = norm([sqrtQ*(x_sim-x_r(:,1:t+1)),sqrtR*(u_sim-u_r(:,t))]);
-fprintf('Average time per iteration of the optimisation: %.2f s\n', t_avg/iter_count);
-fprintf('Closed loop cost: %.3e\n', J_run);
+fprintf('Average time per iteration of the optimisation: %.2f s\n', t_avg/iter_count)
 
 %% Plot results
 t = (0:T_sim)*p.delta;
 figure
 subplot(3,1,1)
-stairs(t, [u_sim u_sim(end)],'b','LineWidth',1)
+stairs(t, [u_sim u_sim(end)])
 hold on
 plot(t,[p.u_min;p.u_max]*ones(1,T_sim+1),'--')
 %axis([0 t(end) min(u_sim)/1.2 max(u_sim)*1.2])
-ylabel('Control $u_t$ (V)', 'Interpreter','latex')
+ylabel('Control, $u_t$ (V)', 'Interpreter','latex')
 grid on
 subplot(3,1,2)
-plot(t,x_sim(1,:),'b','LineWidth',1)
+stairs(t,x_sim(1,:))
 hold on
 plot(t,[p.x_min(1);p.x_max(1)]*ones(1,T_sim+1),'--')
 %axis([0 t(end) 0 20])
-ylabel('State $[x_t]_1$ (cm)', 'Interpreter','latex')
+ylabel('State, $[x_t]_1$ (cm)', 'Interpreter','latex')
 grid on
 subplot(3,1,3)
-plot(t,x_sim(2,:),'b','LineWidth',1)
+stairs(t,x_sim(2,:))
 hold on
 plot(t,[p.x_min(2);p.x_max(2)]*ones(1,T_sim+1),'--')
 plot(t,p.h_r(2)*ones(1,T_sim+1),'-.')
 %axis([0 t(end) 0 20])
-ylabel('State $[x_t]_2$ (cm)', 'Interpreter','latex')
-xlabel('time $t$ (s)', 'Interpreter','latex')
+ylabel('State, $[x_t]_2$ (cm)', 'Interpreter','latex')
+xlabel('time step, t', 'Interpreter','latex')
 grid on
 %figure(1); hold on;
 %plot(x_sim(1,:),x_sim(2,:));

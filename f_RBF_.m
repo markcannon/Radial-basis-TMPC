@@ -1,4 +1,4 @@
-function [f_out, D_out] = f_RBF(x, u, theta, c, rho, dtheta)
+function f_out = f_RBF_(x, u, theta, c, rho, dtheta, ctype)
 %F_RBF Compute RBF function approximation of f using sums of multiquadrics 
 % Input:  - x: state 
 %         - u: input
@@ -14,12 +14,6 @@ end
 % Problem dimensions
 [nx, N] = size(x);
 %f_out = zeros(nx, N);
-if nargout > 1 && N == 1
-    for k = 1:nx
-        n_theta(k) = length(theta{k});
-    end
-    D_out = zeros(nx,sum(n_theta));
-end
 
 % Redefine input
 %z = zeros(nx, N, nx);
@@ -41,8 +35,11 @@ for k=1:nx
     % Multiquadric
     dx = repmat(sqrt(rho_)', [nx, 1, N]).*(x_ - repmat(c_, [1, 1, N]));
     dx = [ dx ; ones(1, N_RBF,N)];
-    mult = norms(dx, 2, 1);
-
+    if ctype == 0 % c is an array of real numbers
+        mult = sqrt( sum( dx .* conj( dx ), 1 ) );
+    else % c is an sdpvar
+        mult = sqrt( sum( dx .* transpose( dx ), 1 ) );
+    end
 
 %     % Multiquadric
 %     dx = x_ - repmat(c_, [1, 1, N]);
@@ -55,10 +52,6 @@ for k=1:nx
     
     % Reshape output
     f_out(k, :) = reshape(f,  1, N); 
-
-    if nargout > 1 && N == 1
-        D_out(k,sum(n_theta(1:k-1))+(1:n_theta(k))) = mult;
-    end
 end 
 end
 

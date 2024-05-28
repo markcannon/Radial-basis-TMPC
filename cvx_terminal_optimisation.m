@@ -1,19 +1,18 @@
-function [c, xlb, xub, cvx_optval, cvx_status] = cvx_optimisation(x_0, u_0, c_0, x_r, u_r, A1, A2, B1, B2, K, sqrtR, sqrtQ, sqrtV, sqrtP, p, theta_g, c_g, rho_g, theta_h, c_h, rho_h, Jold)
-%CVX_OPTIMISATION Solve optimisation problem
+function [c, xlb, xub, cvx_optval, cvx_status] = cvx_terminal_optimisation(x_0, u_0, c_0, x_r, A1, A2, B1, B2, K, sqrtV, p, theta_g, c_g, rho_g, theta_h, c_h, rho_h)
+%CVX_Terminal_OPTIMISATION minimise terminal constraint violation
 
 % Initialisation
 [nu, N] = size(u_0);    % number of inputs / horizon 
 nx = size(x_0, 1);      % number of states       
 nv = 2^nx;              % number of vertices
 x_r_term = x_r(:,end);
-x_r = x_r(:, 1:end-1);
 x_0 = x_0(:, 1:end-1);
 
 % Constraint sets
 U_min = p.u_min*ones(1,N); 
 U_max = p.u_max*ones(1,N);
-X_min = p.x_min*ones(1,N-1);
-X_max = p.x_max*ones(1,N-1);
+X_min = p.x_min*ones(1,N);
+X_max = p.x_max*ones(1,N);
 
 % Some useful matrices
 A1_c =num2cell(A1,[1,2]); 
@@ -29,10 +28,10 @@ K_ = blkdiag(K_c{:});
 
 cvx_begin quiet
   cvx_solver mosek
-   variables l_x(N) l_u(N) l_n(1) xub(nx, N+1) xlb(nx, N+1) c(nu, N) J(1)
+   variables l_n(1) xub(nx, N+1) xlb(nx, N+1) c(nu, N)
    expressions x_vertex(nx, N+1, nv) x(nx, N+1) u(nu, N);
    % minimize(sum(l_x + l_u) + l_n)
-   minimize(J)
+   minimize(l_n)
    subject to
    
    % Define vertices
@@ -41,10 +40,8 @@ cvx_begin quiet
    x_vertex(:, :, 3) = [xlb(1, :); xub(2, :)];
    x_vertex(:, :, 4) = [xub(1, :); xub(2, :)];
 
-   norm([l_x; l_u; l_n]) <= J;
-   J <= Jold;
    for l=1:nv
-       % Current vertex 
+       % Current vertex
        x = x_vertex(:, 1:end-1, l);
        x_term = x_vertex(:, end, l);
        x_ = reshape(x, [nx*N, 1]);
@@ -61,20 +58,18 @@ cvx_begin quiet
        B2_du = reshape(B2_ * du_, [nx, N]);
 
        % Objective
-       (abs(sqrtQ*(x - x_r)))' <= l_x;
-       (abs(sqrtR*(u - u_r)))' <= l_u;
-       norm(sqrtP*(x_term - x_r_term),2) <= l_n;
+       norm(sqrtV*(x_term - x_r_term),2) <= l_n;
 
        % Input constraints
        U_min <= u;
        U_max >= u;
 
        % State constraints
-       X_min <= x(:,2:end);
-       X_max >= x(:,2:end);
+       X_min <= x;
+       X_max >= x;
 
        % Initial conditions
-       x(:, 1) == x_0(:, 1); 
+       x(:, 1) == x_0(:, 1);
 
        % Tube constraint
        xlb(:, 2:end) <= x + p.delta*(f_RBF(x_0, u_0, theta_g, c_g, rho_g, 1/p.dtheta) + A1_dx + B1_du ...
@@ -82,9 +77,7 @@ cvx_begin quiet
        xub(:, 2:end) >= x + p.delta*(f_RBF(x, u, theta_g, c_g, rho_g, p.dtheta) ...
            - (f_RBF(x_0, u_0, theta_h, c_h, rho_h, 1/p.dtheta) + A2_dx + B2_du) + p.w_max.*ones(nx, N)) ;
 
-       % Terminal set
-       norm(sqrtV*(x_term - x_r_term),2) <= 1;
-   end 
+   end
 
 cvx_end
 end
