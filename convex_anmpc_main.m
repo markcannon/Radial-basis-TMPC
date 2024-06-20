@@ -21,12 +21,12 @@ end
 
 %% Simulation parameters
 p = param_init();                  % Initialise problem parameters 
-T_sim = 100;                         % Number of time steps simulated
+T_sim = 20;                         % Number of time steps simulated
 Tmax = 50;                         % Number of time steps in MPC horizon
 p.delta = 1;                       % discrete time sampling interval
-maxiter = 10;                       % Max number of iterations
-maxiterLS = 50;                    % Max number of line search iterations
-alphaLS = 0.1;                      % Line search scaling factor
+maxiter = 5;                       % Max number of iterations
+maxiterLS = 10;                    % Max number of line search iterations
+alphaLS = 0.2;                      % Line search scaling factor
 Q = [0 0;0 1]; R = 0.1;            % Cost matrices
 sqrtQ = [0 1]; sqrtR = R^0.5; 
 dtheta = 1; p.dtheta = dtheta;
@@ -78,7 +78,7 @@ p_test_fit = p;
 p_test_fit.x_max = p.x_max - [0;0];
 p_test_fit.x_min = p.x_min + [10;10];
 MAE = test_fit(@dynamics, dim_N_test, f_RBF_, g_RBF, h_RBF, p_test_fit, plt); 
-p.w_max = MAE;
+p.w_max = 1*MAE;
 % *** change p.w_max to introduce artificial disturbance ***
 
 % theta_g = theta_g_old;
@@ -100,9 +100,8 @@ B_d_term = p.delta*(B1_term - B2_term);
 % Set optimisation
 [K,P,V,gam,beta_cost] = term_comp(A_d_term, B_d_term,Q,R,p);
 sqrtP = sqrtm(P); sqrtV = sqrtm(V); 
-p.w_max = MAE;
 
-% p.A1 = p.A1*0.8; % reduce flow between tanks by 20%
+%p.A1 = p.A1*0.8; % reduce flow between tanks by 20%
 
 %% Feasible inital trajectory
 x_0(:,1) = p.x_init; % initial state
@@ -151,6 +150,10 @@ K_dp_c = num2cell(K_dp,[1,2]);
 K_dp_ = blkdiag(K_dp_c{:});
 c_0 = u_0 - reshape(K_dp_ * reshape(x_0(:,1:Tmax), [p.nx*Tmax, 1]), [p.nu, Tmax]);
 c_00 = c_0;
+x0_00 = x_0(:,1);
+delta_c_init = 1e-6; % placeholder
+delta_x_init = 1e-6; % placeholder
+Jold = sqrt(Jsq_init);
 K_dp_00 = K_dp;
 plot_init(x_0,u_0,x_r,V,p);
 
@@ -165,7 +168,6 @@ end
 %% MPC loop
 ctol = 1e-2;
 Jtol = 1e-2;
-Jold = sqrt(Jsq_init);
 t = 0; 
 x_sim(:,1) = p.x_init; % initial state
 while t < T_sim
@@ -180,10 +182,13 @@ while t < T_sim
             c_term = u_r(:,t+Tmax) - K*x_r(:,t+Tmax);
             c_0 = [c_0(2:Tmax), c_term];
             c_00 = [c_00(2:Tmax), c_term];
+            x0_00 = x_0(:,2);
+            x_0(:,1) = x_sim(:,t+1);
+            % delta_c_init = norm(c_0 - c_00);
+            % delta_x_init = norm(x_0(:,1) - x0_00);
+            Jold = sqrt(Jold^2 - (norm([sqrtQ*(x_sim(:,t)-x_r(:,t));sqrtR*(u_sim(:,t)-u_r(:,t))]))^2 + beta_cost);
             K_dp(:,:,1:end-1) = K_dp(:,:,2:end);
             K_dp(:,:,end) = K;
-            x_0(:,1) = x_sim(:,t+1);
-            Jold = sqrt(Jold^2 - (norm([sqrtQ*(x_sim(:,t)-x_r(:,t));sqrtR*(u_sim(:,t)-u_r(:,t))]))^2 + beta_cost);
         end
 
         for i = 1:Tmax
@@ -218,7 +223,7 @@ while t < T_sim
         [c, x_lb, x_ub, J, cvx_status] = cvx_optimisation(x_0, u_0, c_0, ...
             x_r(:,t+(1:Tmax+1)), u_r(:,t+(1:Tmax)), A1, A2, B1, B2, K_dp, ...
             sqrtR, sqrtQ, sqrtV, sqrtP, p, ...
-            theta_g, c_g, rho_g, theta_h, c_h, rho_h, 1.1*Jold);
+            theta_g, c_g, rho_g, theta_h, c_h, rho_h, 1.05*Jold);
 
         % [c, x_lb, x_ub, info] = mpc_ocp(x_0, u_0, c_0, ...
         %     x_r, u_r, Phi1, Phi2, B1, B2, K, ...
@@ -230,30 +235,34 @@ while t < T_sim
         t_avg = t_avg + t_elapsed;
         iter_count = iter_count+1;
 
-        % Update input perturbation
+        % Update initial linearisation state and control input perturbation
         if ~strcmp(cvx_status, 'Solved') && ~strcmp(cvx_status, 'Inaccurate/Solved')
-            c_0 = c_00 + alphaLS*(c_0 - c_00)/norm(c_00);
+            c_0 = c_00 + alphaLS*(c_0 - c_00);
+            x_0(:,1) = x0_00 + alphaLS*(x_0(:,1) - x0_00);
             K_dp = K_dp_00;
+            delta_c = norm(c_0 - c_00)/norm(c_00);
+            delta_x0 = norm(x_0(:,1) - x0_00);
             fprintf("| iterLS %d/%d ", iterLS, maxiterLS);
             iterLS = iterLS + 1;
             if iterLS > maxiterLS || (t == 0 && iter == 1)
                 fprintf("\n");
                 error("Failed to find feasible solution"); % give up
             end
-            delta_c = norm(c_0 - c_00)/norm(c_00);
         else
             deltaJ = abs(J - Jold)/Jold;
             Jold = J;
             c_00 = c_0;
+            x0_00 = x_0(:,1);
             K_dp_00 = K_dp;
             c_0 = c_0 + c;
             delta_c = norm(c_0 - c_00)/norm(c_00);
+            delta_x0 = norm(x_0(:,1) - x0_00);
             iter = iter + 1;
             if (deltaJ < Jtol && delta_c < ctol) || iter > maxiter
                 iterflag = 0;
             end
         end
-        fprintf(1,"delta_c %.3e deltaJ %.3e J %.3e\n", delta_c, deltaJ, Jold);
+        fprintf(1,"delta_c %.3e delta_x0 %.3e deltaJ %.3e J %.3e\n", delta_c, delta_x0, deltaJ, Jold);
 
     end
 

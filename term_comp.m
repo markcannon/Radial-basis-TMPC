@@ -13,7 +13,7 @@ w(1:2,4) = [-p.w_max(1);p.w_max(2)];
 
 % Maximize invariant feasible ellipsoid (by minimizing maximum eigenvalue)
 % subject to bound on worst case mode 2 cost
-lambda_scaling = 4; % 4;
+lambda_scaling = 10; % 4;
 
 cvx_begin sdp
 cvx_solver mosek
