@@ -48,7 +48,7 @@ iter_count = 0;                    % counter for number of iterations
 %% DC decomposition
 % Define RBF 
 N_samples = 1000; 
-sqt_N_RBF = 3;
+sqt_N_RBF = 5;
 N_RBF = sqt_N_RBF^2;               % number of RBF (only works in 2D)
 [X1_RBF, X2_RBF] = meshgrid(linspace(p.x_min(1)-3, p.x_max(1)+3, sqt_N_RBF),...
                             linspace(p.x_min(1)-3, p.x_max(1)+3, sqt_N_RBF));
@@ -250,7 +250,8 @@ while t < T_sim
             end
         else
             deltaJ = abs(J - Jold)/Jold;
-            Jold = J;
+            % Jold = J; % only update the cost bound at the first iteration
+            % of each timestep
             c_00 = c_0;
             x0_00 = x_0(:,1);
             K_dp_00 = K_dp;
